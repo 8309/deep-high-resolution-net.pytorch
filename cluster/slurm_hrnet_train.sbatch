@@ -29,6 +29,12 @@ GPU_SAMPLE_SEC="${GPU_SAMPLE_SEC:-30}"
 DEBUG_DUMP="${DEBUG_DUMP:-0}"
 RUN_MODE="${RUN_MODE:-train}"
 
+# Auto-chain: if set, the job will submit the next chunk upon successful completion.
+# TARGET_EPOCH=0 means auto-chain is disabled.
+TARGET_EPOCH="${TARGET_EPOCH:-0}"
+CHUNK_EPOCHS="${CHUNK_EPOCHS:-0}"
+CHAIN_SEQ="${CHAIN_SEQ:-1}"
+
 # Optional switches for end-to-end pipeline
 RUN_POST_EVAL="${RUN_POST_EVAL:-0}"
 RUN_POST_DEMO="${RUN_POST_DEMO:-0}"
@@ -232,6 +238,39 @@ PY
   fi
 else
   echo "[INFO] RUN_MODE=$RUN_MODE -> skip training phase"
+fi
+
+# ── Auto-chain: submit next chunk if training succeeded and more epochs remain ──
+if [[ "$RUN_MODE" == "train" ]] && (( TARGET_EPOCH > 0 && CHUNK_EPOCHS > 0 && END_EPOCH < TARGET_EPOCH )); then
+  next_begin="$END_EPOCH"
+  next_end=$(( END_EPOCH + CHUNK_EPOCHS ))
+  if (( next_end > TARGET_EPOCH )); then
+    next_end="$TARGET_EPOCH"
+  fi
+  next_seq=$(( CHAIN_SEQ + 1 ))
+
+  echo "[AUTO-CHAIN] submitting next chunk: begin=$next_begin end=$next_end seq=$next_seq target=$TARGET_EPOCH"
+
+  next_job_id_raw=$(sbatch --parsable \
+    --job-name "hrnet-c${next_seq}" \
+    --output "$RUN_ROOT/slurm/slurm-chain${next_seq}-%j.out" \
+    --error "$RUN_ROOT/slurm/slurm-chain${next_seq}-%j.err" \
+    --export=ALL,RUN_ID="$RUN_ID",PROJECT_DIR="$PROJECT_DIR",CONDA_ENV="$CONDA_ENV",DATASET_ROOT="$DATASET_ROOT",COCO_BBOX_FILE="$COCO_BBOX_FILE",PRETRAINED_MODEL="$PRETRAINED_MODEL",CFG_FILE="$CFG_FILE",RUN_ROOT="$RUN_ROOT",BEGIN_EPOCH="$next_begin",END_EPOCH="$next_end",BATCH_SIZE_PER_GPU="$BATCH_SIZE_PER_GPU",NUM_WORKERS="$NUM_WORKERS",PRINT_FREQ="$PRINT_FREQ",GPU_SAMPLE_SEC="$GPU_SAMPLE_SEC",DEBUG_DUMP="$DEBUG_DUMP",RUN_POST_EVAL="$RUN_POST_EVAL",RUN_POST_DEMO="$RUN_POST_DEMO",RUN_MODE="$RUN_MODE",TARGET_EPOCH="$TARGET_EPOCH",CHUNK_EPOCHS="$CHUNK_EPOCHS",CHAIN_SEQ="$next_seq" \
+    "$PROJECT_DIR/cluster/slurm_hrnet_train.sbatch")
+
+  next_job_id="${next_job_id_raw%%;*}"
+  echo "[AUTO-CHAIN] submitted job_id=$next_job_id begin=$next_begin end=$next_end"
+
+  # Log to chain schedule
+  chain_log="$RUN_ROOT/summary/auto_chain_log.csv"
+  if [[ ! -f "$chain_log" ]]; then
+    echo "seq,job_id,begin_epoch,end_epoch,parent_job_id,submitted_utc" > "$chain_log"
+  fi
+  echo "$next_seq,$next_job_id,$next_begin,$next_end,${SLURM_JOB_ID:-manual},$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$chain_log"
+else
+  if [[ "$RUN_MODE" == "train" ]] && (( TARGET_EPOCH > 0 && END_EPOCH >= TARGET_EPOCH )); then
+    echo "[AUTO-CHAIN] target epoch $TARGET_EPOCH reached — no more chunks to submit"
+  fi
 fi
 
 model_for_eval="$final_output_dir/final_state.pth"

@@ -93,3 +93,6 @@ external/
 
 draws/
 plot/
+
+# Internal handoff / codex working docs (may contain sensitive info)
+_codex/
