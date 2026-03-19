@@ -88,8 +88,8 @@ output/*
 models/*
 log/*
 data/*
+runs/*
 external/
 
 draws/
 plot/
-
